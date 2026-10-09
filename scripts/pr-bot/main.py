@@ -102,8 +102,9 @@ def initialize():
     saveResult(state)  # Remains a valid advisory failure artifact if setup fails.
     enabled = parse_indexers(env.get('INPUT_INDEXERS'))
     source = sourceDigest(root)
-    # `indexers1` versions the cache for the indexer install commands/versions.
-    tools = f'tld{tldVersion[1:]}-go1.26.2-node24-scip-indexers1'
+    # The `scip-indexersN` suffix versions the cache for indexer install
+    # commands/versions; bump it whenever those change.
+    tools = f'tld{tldVersion[1:]}-go1.26.2-node24-scip-indexers3'
     source_input = (f"{env.get('GITHUB_REPOSITORY')}|{source}|{tools}|"
                     f"{' '.join(enabled)}|{env.get('INPUT_PREPARE_COMMAND')}")
     namespace = (f"tld-pr-v1-{env.get('RUNNER_OS')}-{env.get('RUNNER_ARCH')}-"

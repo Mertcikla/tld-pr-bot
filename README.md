@@ -167,4 +167,15 @@ while CI remains green.
 ```bash
 python3 -m unittest discover -s scripts/pr-bot -p 'test_*.py' -v
 actionlint .github/workflows/*.yml
+scripts/pr-bot/test-action-docker.sh          # end-to-end, requires Docker
 ```
+
+The Docker test builds an Ubuntu image with the toolchains the action relies on
+(Go, Node, PHP/Composer, .NET, Java, Dart, Ruby, Rust) and, using
+`scripts/pr-bot/install-tools.sh` (the same script the action runs), installs the
+tld release plus every SCIP indexer. It probes each binary, confirms `tld doctor`
+finds them all, then drives `main.py init` and `main.py generate` against a small
+Go + TypeScript fixture repository and asserts a ready Mermaid diagram. Override
+`INDEXERS` to test a subset, pin `TLD_VERSION`, or set `PLATFORM` (defaults to
+`linux/amd64`, since the `scip-clang` and `scip-ruby` releases only publish
+x86_64 Linux artifacts).
