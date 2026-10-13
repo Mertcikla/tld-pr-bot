@@ -116,7 +116,8 @@ def validateResult(raw, trusted):
 def commentBody(result, trusted):
     if result.get('status') != 'ready':
         return None
-    body = f"{marker}\n{runMarker(trusted)}\n{(result.get('markdown') or '').strip()}"
+    body = (f"{marker}\n{runMarker(trusted)}\n{(result.get('markdown') or '').strip()}"
+            '\n\n[tld diff diagram bot](https://github.com/Mertcikla/tld-pr-bot)')
     return body if len(body.encode('utf-8')) <= maxCommentBytes else None
 
 

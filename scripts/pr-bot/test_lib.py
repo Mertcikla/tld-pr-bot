@@ -124,9 +124,10 @@ class LibTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validateResult('not-json', trusted)
 
-    def test_successful_comments_display_only_the_mermaid_diagram(self):
+    def test_successful_comments_display_the_mermaid_diagram_and_signature(self):
         body = commentBody(ready, trusted)
-        self.assertEqual(body, f"{marker}\n<!-- tld-run:12:1 -->\n{ready['markdown'].strip()}")
+        self.assertEqual(body, f"{marker}\n<!-- tld-run:12:1 -->\n{ready['markdown'].strip()}"
+                         '\n\n[tld diff diagram bot](https://github.com/Mertcikla/tld-pr-bot)')
 
     def test_unsuccessful_results_and_oversized_diagrams_create_no_comment(self):
         oversized = {**ready, 'markdown': 'x' * 90_000}
