@@ -129,7 +129,7 @@ def generate():
     reportPath = stateDir / 'compare-report.json'
     result = subprocess.run([
         str(binaryDir / 'tld'), 'git', 'compare', repository, state['base'], state['head'],
-        '--markdown', '--depth', '0', '--max-nodes', '0', '--max-bytes', '0',
+        '--markdown', '--blast-radius', '0', '--max-nodes', '0', '--max-bytes', '0',
         '--max-elements', str(cap['elements']), '--max-connectors', str(cap['connectors']),
         '--report-json', str(reportPath), '--prepare-command', env.get('INPUT_PREPARE_COMMAND') or '',
         '--data-dir', str(dataDir)],
@@ -194,13 +194,10 @@ def publish():
     except Exception as error:
         summary(f'tld PR diagram artifact rejected: {error}')
         result = {**trusted, 'base': trusted['targetBase'], 'status': 'error'}
-    # Only a ready diagram is worth a comment; everything else exits clean.
-    if result.get('status') != 'ready':
-        summary(f"tld PR diagram: nothing to publish ({result.get('status')}).")
-        return
     api = GitHub(env.get('GITHUB_TOKEN'), env.get('GITHUB_API_URL'))
-    summary('tld PR diagram: comment published.' if upsertComment(api, trusted, result)
-            else 'tld PR diagram: comment not published (stale, closed, or oversized).')
+    updated = upsertComment(api, trusted, result)
+    summary(f"tld PR diagram: comment updated ({result.get('status')})." if updated
+            else 'tld PR diagram: comment unchanged.')
 
 
 def main():

@@ -2,7 +2,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from lib import (commentBody, limits, marker, parse_indexers, publicationContext, resolve_tld_version,
+from lib import (commentBody, limits, marker, parse_indexers, publicationContext, resolve_tld_version, staleNotice,
                  supported_indexers, upsertComment, validateResult)
 
 head = 'a' * 40
@@ -20,6 +20,10 @@ def pr():
 
 def association():
     return {'number': 7, 'head': {'sha': head, 'repo': {'id': 9}}}
+
+
+def botComment(body):
+    return {'id': 8, 'user': {'type': 'Bot', 'login': 'github-actions[bot]'}, 'body': body}
 
 
 def api_fixture(run_changes=None, pr_changes=None, comments=None, associated=None):
@@ -120,22 +124,64 @@ class LibTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validateResult('not-json', trusted)
 
-    def test_comments_contain_the_revisions_diagram_and_run_link(self):
+    def test_successful_comments_display_only_the_mermaid_diagram(self):
         body = commentBody(ready, trusted)
-        for value in [marker, head[:12], base[:12], '```mermaid', trusted['runURL']]:
-            self.assertIn(value, body)
-        for value in ['Change risk', 'Change stats', 'elements']:
-            self.assertNotIn(value, body)
+        self.assertEqual(body, f"{marker}\n<!-- tld-run:12:1 -->\n{ready['markdown'].strip()}")
 
-    def test_oversized_diagrams_produce_no_comment_and_failures_stay_fixed(self):
+    def test_unsuccessful_results_and_oversized_diagrams_create_no_comment(self):
         oversized = {**ready, 'markdown': 'x' * 90_000}
-        self.assertIsNone(commentBody(oversized, trusted))
-        empty = api_fixture(comments=[])
-        self.assertFalse(upsertComment(empty, trusted, oversized))
-        self.assertEqual(empty.calls, [])
-        for status in ['empty', 'error', 'skipped']:
-            body = commentBody({**ready, 'status': status, 'reason': '@everyone'}, trusted)
-            self.assertNotIn('@everyone', body)
+        results = [oversized] + [{**ready, 'status': status, 'reason': '@everyone'}
+                                 for status in ['empty', 'error', 'skipped']]
+        for result in results:
+            with self.subTest(status=result['status']):
+                self.assertIsNone(commentBody(result, trusted))
+                empty = api_fixture(comments=[])
+                self.assertFalse(upsertComment(empty, trusted, result))
+                self.assertTrue(all(call['method'] == 'GET' for call in empty.calls))
+
+    def test_unsuccessful_updates_preserve_the_diagram_and_mark_it_stale(self):
+        # A legacy comment retains its diagram and surrounding content on failure.
+        published = (f"{marker}\n<!-- tld-run:11:1 -->\n### tld PR diagram\n\n"
+                     f"`{base[:12]}` → `{head[:12]}`.\n\n{ready['markdown']}\n[Workflow run](https://example.com)")
+        results = [{**ready, 'status': status, 'reason': '@everyone'}
+                   for status in ['empty', 'error', 'skipped']]
+        results.append({**ready, 'markdown': 'x' * 90_000})
+        for result in results:
+            with self.subTest(status=result['status']):
+                api = api_fixture(comments=[botComment(published)])
+                self.assertTrue(upsertComment(api, trusted, result))
+                call = api.calls[-1]
+                self.assertEqual(call['method'], 'PATCH')
+                self.assertEqual(call['path'], '/repos/owner/repo/issues/comments/8')
+                self.assertEqual(call['body']['body'],
+                                 published.replace('tld-run:11:1', 'tld-run:12:1') + f'\n\n{staleNotice}')
+                self.assertNotIn('@everyone', call['body']['body'])
+
+    def test_stale_notice_is_idempotent_and_success_clears_it(self):
+        failed = {**ready, 'status': 'error'}
+        api = api_fixture(comments=[botComment(commentBody(ready, trusted))])
+        self.assertTrue(upsertComment(api, trusted, failed))
+        stale_body = api.calls[-1]['body']['body']
+        same = api_fixture(comments=[botComment(stale_body)])
+        self.assertTrue(upsertComment(same, trusted, failed))
+        self.assertTrue(all(call['method'] == 'GET' for call in same.calls))
+
+        later = {**trusted, 'runID': 13}
+        repeated = api_fixture(comments=[botComment(stale_body)])
+        self.assertTrue(upsertComment(repeated, later, failed))
+        repeated_body = repeated.calls[-1]['body']['body']
+        self.assertEqual(repeated_body.count(staleNotice), 1)
+        self.assertIn('<!-- tld-run:13:1 -->', repeated_body)
+
+        recovered = api_fixture(comments=[botComment(repeated_body)])
+        new_diagram = {**ready, 'markdown': '```mermaid\nflowchart LR\n  c["New"]\n```'}
+        self.assertTrue(upsertComment(recovered, later, new_diagram))
+        self.assertEqual(recovered.calls[-1]['body']['body'], commentBody(new_diagram, later))
+
+    def test_failures_do_not_add_notices_to_old_comments_without_a_diagram(self):
+        api = api_fixture(comments=[botComment(f'{marker}\nDiagram generation was unsuccessful.')])
+        self.assertFalse(upsertComment(api, trusted, {**ready, 'status': 'error'}))
+        self.assertTrue(all(call['method'] == 'GET' for call in api.calls))
 
     def test_publisher_accepts_associated_same_repo_and_fork_prs(self):
         self.assertEqual(publicationContext(api_fixture(), 'owner/repo', 12, 'pr-diagram.yml'), trusted)
@@ -168,7 +214,7 @@ class LibTest(unittest.TestCase):
         self.assertEqual(create.calls[-1]['method'], 'POST')
         update = api_fixture(comments=[spoof, {'id': 8, 'user': {'type': 'Bot', 'login': 'github-actions[bot]'},
                                                'body': marker}])
-        self.assertTrue(upsertComment(update, trusted, {**ready, 'status': 'skipped'}))
+        self.assertTrue(upsertComment(update, trusted, ready))
         self.assertEqual(update.calls[-1]['path'], '/repos/owner/repo/issues/comments/8')
         self.assertEqual(update.calls[-1]['method'], 'PATCH')
 
@@ -183,6 +229,23 @@ class LibTest(unittest.TestCase):
                                       'body': commentBody(ready, trusted)}])
         self.assertTrue(upsertComment(same, trusted, ready))
         self.assertTrue(all(call['method'] == 'GET' for call in same.calls))
+
+    def test_failed_updates_cannot_mark_newer_or_outdated_pr_diagrams_stale(self):
+        failed = {**ready, 'status': 'error'}
+        cases = [
+            {'comments': [botComment(commentBody(ready, {**trusted, 'runID': 13}))]},
+            {'comments': [botComment(commentBody(ready, {**trusted, 'runAttempt': 2}))]},
+            {'comments': [botComment(commentBody(ready, trusted))], 'pr_changes': {'state': 'closed'}},
+            {'comments': [botComment(commentBody(ready, trusted))], 'pr_changes': {'base': {'sha': head}}},
+            {'comments': [botComment(commentBody(ready, trusted))], 'pr_changes': {'head': {'sha': base}}},
+            {'comments': [{'id': 8, 'user': {'type': 'User', 'login': 'someone'},
+                           'body': commentBody(ready, trusted)}]},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                api = api_fixture(**case)
+                self.assertFalse(upsertComment(api, trusted, failed))
+                self.assertTrue(all(call['method'] == 'GET' for call in api.calls))
 
 
 if __name__ == '__main__':

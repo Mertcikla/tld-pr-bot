@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 marker = '<!-- tld-pr-diagram:v1 -->'
+staleNotice = '> Diagram is stale: the latest update was unsuccessful.'
 maxResultBytes = 256 * 1024
 maxCommentBytes = 60 * 1024
 _sha_pattern = re.compile(r'^[0-9a-f]{40}$')
@@ -113,25 +114,28 @@ def validateResult(raw, trusted):
 
 
 def commentBody(result, trusted):
-    header = (f"{marker}\n<!-- tld-run:{trusted['runID']}:{trusted.get('runAttempt') or 1} -->\n"
-              '### tld PR diagram\n\n')
-    link = f"[Workflow run]({trusted['runURL']})"
-    revisions = f"`{result.get('base', '')[:12]}` → `{result.get('head', '')[:12]}`."
-    status = result.get('status')
-    if status == 'ready':
-        content = '\n\n'.join([revisions, (result.get('markdown') or '').strip(), link])
-    elif status == 'skipped':
-        reasons = {'artifact-size': 'output exceeds the artifact size budget'}
-        reason = reasons.get(result.get('skipReason'),
-                             'diagram exceeds the configured element or connector limit')
-        content = '\n\n'.join([revisions, f'Diagram skipped: {reason}.', link])
-    elif status == 'empty':
-        content = '\n\n'.join([revisions, 'No indexable changes to diagram.', link])
-    else:
-        content = '\n\n'.join(['Diagram generation was unsuccessful. See the workflow logs for details.', link])
-    if len((header + content).encode('utf-8')) > maxCommentBytes:
+    if result.get('status') != 'ready':
         return None
-    return header + content
+    body = f"{marker}\n{runMarker(trusted)}\n{(result.get('markdown') or '').strip()}"
+    return body if len(body.encode('utf-8')) <= maxCommentBytes else None
+
+
+def runMarker(trusted):
+    return f"<!-- tld-run:{trusted['runID']}:{trusted.get('runAttempt') or 1} -->"
+
+
+def staleCommentBody(body, trusted):
+    # Preserve the published diagram, including comments produced by older bots.
+    if not re.search(r'^```mermaid\r?\n[\s\S]*?\r?\n```', body, re.MULTILINE):
+        return None
+    if re.search(r'<!-- tld-run:[0-9]+:[0-9]+ -->', body):
+        body = re.sub(r'<!-- tld-run:[0-9]+:[0-9]+ -->', runMarker(trusted), body, count=1)
+    else:
+        body = body.replace(marker, f'{marker}\n{runMarker(trusted)}', 1)
+    body = body.rstrip()
+    if not body.endswith(f'\n\n{staleNotice}'):
+        body += f'\n\n{staleNotice}'
+    return body if len(body.encode('utf-8')) <= maxCommentBytes else None
 
 
 def _http(method, url, headers, data, timeout):
@@ -206,8 +210,6 @@ def publicationContext(api, repository, runID, sourceWorkflow, serverURL='https:
 
 def upsertComment(api, trusted, result):
     body = commentBody(result, trusted)
-    if body is None:
-        return False
     # Recheck immediately before a mutation; a newer PR update may have arrived.
     prefix = f"/repos/{trusted['repository']}"
     pr = api.request('GET', f"{prefix}/pulls/{trusted['prNumber']}")
@@ -226,6 +228,12 @@ def upsertComment(api, trusted, result):
                      or (int(previous.group(1)) == trusted['runID']
                          and int(previous.group(2)) > (trusted.get('runAttempt') or 1))):
         return False
+    if body is None:
+        if not existing:
+            return False
+        body = staleCommentBody(existing.get('body') or '', trusted)
+        if body is None:
+            return False
     if existing:
         if existing.get('body') != body:
             api.request('PATCH', f"{prefix}/issues/comments/{existing['id']}", {'body': body})

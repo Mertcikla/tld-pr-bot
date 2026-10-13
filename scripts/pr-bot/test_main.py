@@ -1,12 +1,18 @@
+import contextlib
+import io
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
+
+from lib import commentBody, staleNotice
 
 script = Path(__file__).resolve().parent / 'main.py'
 
@@ -136,6 +142,48 @@ class MainTest(unittest.TestCase):
         keys = re.findall(r'cache-key<<TLD_OUTPUT\n([^\n]+)', output_path.read_text())
         self.assertIn('-pr-7-', first)
         self.assertNotEqual(keys[-1], keys[-2])
+
+    def test_publisher_preserves_diagrams_for_failed_or_unavailable_results(self):
+        _, _, env, directory = self.fixture()
+        state_dir = directory / 'tld-pr-bot'
+        state = json.loads((state_dir / 'state.json').read_text())
+        trusted = {**state, 'runID': 12, 'runAttempt': 1}
+        (state_dir / 'publication.json').write_text(json.dumps(trusted))
+        download = state_dir / 'download'
+        download.mkdir()
+        artifact = download / 'result.json'
+        ready = {**state, 'status': 'ready',
+                 'markdown': '```mermaid\nflowchart LR\n  a["A"] --> b["B"]\n```'}
+        published = commentBody(ready, {**trusted, 'runID': 11})
+        cases = {
+            'ready': json.dumps(ready),
+            'error': json.dumps({**state, 'status': 'error'}),
+            'empty': json.dumps({**state, 'status': 'empty'}),
+            'skipped': json.dumps({**state, 'status': 'skipped'}),
+            'invalid': 'not-json',
+            'wrong-identity': json.dumps({**ready, 'prNumber': 8}),
+            'oversized': 'x' * (256 * 1024 + 1),
+            'missing': None,
+        }
+        for name, raw in cases.items():
+            with self.subTest(result=name):
+                if raw is None:
+                    artifact.unlink(missing_ok=True)
+                else:
+                    artifact.write_text(raw)
+                api = Mock()
+                api.request.return_value = {'state': 'open', 'head': {'sha': state['head']},
+                                            'base': {'sha': state['targetBase']}}
+                api.pages.return_value = [
+                    {'id': 8, 'user': {'type': 'Bot', 'login': 'github-actions[bot]'}, 'body': published}]
+                with (patch.dict(os.environ, env), patch('lib.GitHub', return_value=api),
+                      contextlib.redirect_stdout(io.StringIO())):
+                    runpy.run_path(str(script))['publish']()
+                expected = commentBody(ready, trusted)
+                if name != 'ready':
+                    expected += f'\n\n{staleNotice}'
+                self.assertEqual(api.request.call_args.args,
+                                 ('PATCH', '/repos/owner/repo/issues/comments/8', {'body': expected}))
 
 
 if __name__ == '__main__':
