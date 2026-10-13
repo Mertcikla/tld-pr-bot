@@ -140,9 +140,19 @@ def generate():
     if result.returncode != 0:
         raise RuntimeError(f'tld exited {result.returncode}')
     report = json.loads(reportPath.read_text())
-    if (report.get('base') != state['base'] or report.get('head') != state['head']
-            or not isinstance(report.get('warnings'), list)):
-        raise RuntimeError('Invalid compare report')
+    if not isinstance(report, dict):
+        raise RuntimeError('Invalid compare report: expected an object')
+    # Current tld reports use canonical comparison metadata; older releases
+    # emitted the revisions at the top level.
+    comparison = report.get('comparison', report)
+    if (not isinstance(comparison, dict) or comparison.get('base') != state['base']
+            or comparison.get('head') != state['head']):
+        raise RuntimeError('Invalid compare report: base/head do not match the requested revisions')
+    if (not isinstance(report.get('warnings'), list)
+            or any(not isinstance(warning, str) for warning in report['warnings'])):
+        raise RuntimeError('Invalid compare report: warnings must be a list of strings')
+    if report.get('status') not in ('ready', 'skipped', 'empty'):
+        raise RuntimeError('Invalid compare report: unsupported status')
     payload = {'version': state['version'], 'repository': state['repository'], 'prNumber': state['prNumber'],
                'targetBase': state['targetBase'], 'base': state['base'], 'head': state['head'],
                'status': report.get('status'),

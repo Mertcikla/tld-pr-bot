@@ -25,8 +25,15 @@ warnings = ['indexer failed'] if os.environ.get('FAKE_WARNINGS') else []
 if os.environ.get('FAKE_ERROR'):
     sys.exit(1)
 with open(args[args.index('--report-json') + 1], 'w') as handle:
-    json.dump({'status': os.environ.get('FAKE_STATUS') or 'ready', 'base': args[3], 'head': args[4],
-               'warnings': warnings}, handle)
+    comparison = {'base': args[3], 'head': args[4]}
+    report = {'status': os.environ.get('FAKE_STATUS') or 'ready',
+              'comparison': comparison, 'warnings': warnings}
+    if os.environ.get('FAKE_LEGACY_REPORT'):
+        report.pop('comparison')
+        report.update(comparison)
+    if os.environ.get('FAKE_REPORT_JSON'):
+        report = json.loads(os.environ['FAKE_REPORT_JSON'])
+    json.dump(report, handle)
 sys.stdout.write('```mermaid\\nflowchart LR\\n  a["A"] --> b["B"]\\n```\\n')
 '''
 
@@ -98,6 +105,45 @@ class MainTest(unittest.TestCase):
         self.assertEqual(result()['status'], 'ready')
         self.assertEqual(result()['prNumber'], 7)
         self.assertIn('```mermaid', result()['markdown'])
+        self.assertIn('cache-ready<<TLD_OUTPUT\ntrue', Path(env['GITHUB_OUTPUT']).read_text())
+
+    def test_producer_accepts_legacy_reports_with_top_level_revisions(self):
+        run, result, _, _ = self.fixture()
+        run('generate', {'FAKE_LEGACY_REPORT': '1'})
+        self.assertEqual(result()['status'], 'ready')
+        self.assertIn('```mermaid', result()['markdown'])
+
+    def test_producer_rejects_invalid_reports_without_saving_the_cache(self):
+        run, result, env, directory = self.fixture()
+        state = json.loads((directory / 'tld-pr-bot' / 'state.json').read_text())
+        comparison = {'base': state['base'], 'head': state['head']}
+        valid = {'status': 'ready', 'comparison': comparison, 'warnings': []}
+        reports = [
+            [],
+            {**valid, 'comparison': None},
+            {**valid, 'comparison': {**comparison, 'base': '0' * 40}},
+            {**valid, 'comparison': {**comparison, 'head': '0' * 40}},
+            {**valid, 'comparison': {}, **comparison},
+            {**valid, 'warnings': None},
+            {**valid, 'warnings': [None]},
+            {**valid, 'status': 'unknown'},
+        ]
+        for report in reports:
+            with self.subTest(report=report):
+                Path(env['GITHUB_OUTPUT']).write_text('')
+                logs = run('generate', {'FAKE_REPORT_JSON': json.dumps(report)})
+                self.assertIn('Invalid compare report:', logs)
+                self.assertEqual(result()['status'], 'error')
+                outputs = Path(env['GITHUB_OUTPUT']).read_text()
+                self.assertIn('cache-ready<<TLD_OUTPUT\nfalse', outputs)
+                self.assertNotIn('cache-ready<<TLD_OUTPUT\ntrue', outputs)
+
+    def test_empty_canonical_reports_are_accepted_and_save_healthy_indexes(self):
+        run, result, env, _ = self.fixture()
+        logs = run('generate', {'FAKE_STATUS': 'empty'})
+        self.assertNotIn('Invalid compare report', logs)
+        self.assertEqual(result()['status'], 'empty')
+        self.assertEqual(result()['markdown'], '')
         self.assertIn('cache-ready<<TLD_OUTPUT\ntrue', Path(env['GITHUB_OUTPUT']).read_text())
 
     def test_partial_indexes_omit_diagrams_and_do_not_save_the_cache(self):
